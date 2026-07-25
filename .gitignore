@@ -11,6 +11,12 @@ dist/
 build/
 inventory.local.yaml
 *.log
+!integrations/wazuh/logtest/*.log
+.env
+.env.*
+!.env.example
+logs/
+secrets/
 .netaudit/
 .DS_Store
 Thumbs.db

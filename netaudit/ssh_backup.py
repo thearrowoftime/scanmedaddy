@@ -67,6 +67,17 @@ class SSHBackupError(Exception):
     """Raised when SSH backup fails."""
 
 
+def check_reachable(device: Device, timeout: float = 5.0) -> tuple[bool, str]:
+    """TCP-connect probe used by dry runs. Returns (reachable, detail)."""
+    import socket
+
+    try:
+        with socket.create_connection((device.host, device.port), timeout=timeout):
+            return True, f"tcp/{device.port} open"
+    except OSError as exc:
+        return False, f"tcp/{device.port} unreachable: {exc}"
+
+
 def _prepare_session(channel: paramiko.Channel, device: Device, log: Callable[[str], None]) -> None:
     """Platform-specific session prep (paging, privilege)."""
     platform = device.platform.lower()

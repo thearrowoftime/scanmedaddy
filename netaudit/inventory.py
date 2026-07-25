@@ -28,46 +28,52 @@ def load_inventory(path: str | Path) -> list[Device]:
     return devices
 
 
+INVENTORY_TEMPLATE = """\
+# Passwords are references, never literals. Supported schemes:
+#   env:NAME                 environment variable (also from .env)
+#   file:C:\\secrets\\fg.txt   first line of a file
+#   wincred:netaudit/fg-01   Windows Credential Manager generic credential
+#   keyring:netaudit/fg-01   keyring package (service/username)
+#   prompt                   ask interactively (not for scheduled runs)
+# Leaving the field empty falls back to NETAUDIT_<DEVICE>_PASSWORD.
+# Verify with: netaudit secrets
+
+devices:
+  - name: fg-120g-01
+    host: 192.168.10.1
+    device_type: firewall
+    platform: fortigate
+    username: admin
+    password: env:FG_120G_01_PASSWORD
+    port: 22
+    tags: [edge, fortigate, lab]
+
+  - name: scalance-xc208-01
+    host: 192.168.20.10
+    device_type: switch
+    platform: scalance_xc
+    username: admin
+    password: env:SCALANCE_XC208_01_PASSWORD
+    port: 22
+    tags: [ot, siemens, lab]
+
+  - name: core-sw-01
+    host: 192.168.1.10
+    device_type: switch
+    platform: cisco_ios
+    username: admin
+    password: wincred:netaudit/core-sw-01
+    enable_password: env:CORE_SW_01_ENABLE_PASSWORD
+    port: 22
+    tags: [core, lab]
+"""
+
+
 def save_inventory_template(path: str | Path) -> Path:
     """Write an example inventory file with FortiGate 120G + SCALANCE XC208."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    template = {
-        "devices": [
-            {
-                "name": "fg-120g-01",
-                "host": "192.168.10.1",
-                "device_type": "firewall",
-                "platform": "fortigate",
-                "username": "admin",
-                "password": "CHANGE_ME",
-                "port": 22,
-                "tags": ["edge", "fortigate", "lab"],
-            },
-            {
-                "name": "scalance-xc208-01",
-                "host": "192.168.20.10",
-                "device_type": "switch",
-                "platform": "scalance_xc",
-                "username": "admin",
-                "password": "CHANGE_ME",
-                "port": 22,
-                "tags": ["ot", "siemens", "lab"],
-            },
-            {
-                "name": "core-sw-01",
-                "host": "192.168.1.10",
-                "device_type": "switch",
-                "platform": "cisco_ios",
-                "username": "admin",
-                "password": "CHANGE_ME",
-                "enable_password": "CHANGE_ME",
-                "port": 22,
-                "tags": ["core", "lab"],
-            },
-        ]
-    }
-    p.write_text(yaml.dump(template, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    p.write_text(INVENTORY_TEMPLATE, encoding="utf-8")
     return p
 
 

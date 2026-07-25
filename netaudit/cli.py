@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from netaudit.audit import (
     load_rules,
     summarize_findings,
 )
-from netaudit.diff import diff_backups, format_diff_markdown
+from netaudit.diff import diff_backups
 from netaudit.export import (
     export_diff_csv,
     export_diff_markdown,
@@ -26,10 +27,14 @@ from netaudit.export import (
     export_findings_markdown,
 )
 from netaudit.inventory import load_inventory, platform_for_device, save_inventory_template
-from netaudit.ssh_backup import SSHBackupError, backup_device
+from netaudit.models import Device, Finding
+from netaudit.runner import AlertSink, RunReport, dry_run, run_backups
+from netaudit.secrets import DEFAULT_ENV_FILE, load_env_file, resolve_inventory_secrets
 from netaudit.store import ConfigStore
 from netaudit.wazuh_integration import (
     export_wazuh_ndjson,
+    finding_to_wazuh_event,
+    format_syslog_line,
     send_wazuh_api,
     send_wazuh_syslog,
 )
@@ -43,10 +48,147 @@ SEVERITY_STYLE = {
     "low": "cyan",
     "info": "dim",
 }
+SOURCE_STYLE = {
+    "inline": "red",
+    "missing": "red",
+    "unset": "dim",
+}
 
 
 def _store(ctx: click.Context) -> ConfigStore:
     return ConfigStore(ctx.obj["backups"])
+
+
+def _load_devices(ctx: click.Context, device_filter: str | None, tag: str | None) -> list[Device]:
+    try:
+        devices = load_inventory(ctx.obj["inventory"])
+    except FileNotFoundError:
+        console.print(
+            f"[red]Inventory not found:[/] {ctx.obj['inventory']}\n"
+            "Run [bold]netaudit init[/] first."
+        )
+        sys.exit(1)
+
+    if device_filter:
+        devices = [d for d in devices if d.name == device_filter]
+        if not devices:
+            console.print(f"[red]Device not in inventory:[/] {device_filter}")
+            sys.exit(1)
+    if tag:
+        devices = [d for d in devices if tag in d.tags]
+        if not devices:
+            console.print(f"[red]No devices with tag:[/] {tag}")
+            sys.exit(1)
+    return devices
+
+
+def _print_run_report(report: RunReport) -> None:
+    table = Table(title=f"Backup run ({report.mode})")
+    table.add_column("Device")
+    table.add_column("Platform")
+    table.add_column("Status")
+    table.add_column("Tries")
+    table.add_column("Detail")
+    status_style = {
+        "ok": "green",
+        "unchanged": "dim",
+        "ready": "green",
+        "failed": "red",
+        "blocked": "red",
+    }
+    for result in report.results:
+        style = status_style.get(result.status, "")
+        detail = result.error or result.detail or (result.path or "")
+        if len(detail) > 70:
+            detail = detail[:67] + "..."
+        table.add_row(
+            result.device,
+            result.platform,
+            f"[{style}]{result.status}[/]",
+            str(result.attempts or "-"),
+            detail,
+        )
+    console.print(table)
+    console.print(
+        Panel(
+            f"ok=[green]{report.ok_count}[/]  changed=[yellow]{report.changed_count}[/]  "
+            f"failed=[red]{report.fail_count}[/]"
+        )
+    )
+    for note in report.alerts_sent:
+        console.print(f"[green]Alert[/] {note}")
+
+
+def _write_json_report(report: RunReport, path: str, extra: dict | None = None) -> None:
+    payload = report.to_dict()
+    if extra:
+        payload.update(extra)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    console.print(f"[green]Wrote[/] {path}")
+
+
+def _alert_sink(
+    wazuh_file: str | None,
+    wazuh_syslog: str | None,
+    port: int,
+    proto: str,
+) -> AlertSink:
+    return AlertSink(
+        wazuh_file=wazuh_file,
+        wazuh_syslog=wazuh_syslog,
+        wazuh_syslog_port=port,
+        wazuh_syslog_proto=proto,
+    )
+
+
+def _audit_devices(
+    ctx: click.Context,
+    store: ConfigStore,
+    device_names: list[str],
+    rules_path: str | None,
+    platform_override: str | None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for name in device_names:
+        try:
+            _meta, text = store.get(name)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/]")
+            continue
+        platform = (
+            platform_override
+            or platform_for_device(ctx.obj["inventory"], name)
+            or infer_platform_from_config(text)
+        )
+        rules = load_rules(rules_path, platform=platform)
+        findings.extend(audit_config(name, text, rules, platform=platform))
+    return findings
+
+
+def _print_findings(findings: list[Finding]) -> dict[str, int]:
+    summary = summarize_findings(findings)
+    table = Table(title="Audit findings")
+    table.add_column("Sev")
+    table.add_column("Device")
+    table.add_column("Rule")
+    table.add_column("Evidence / detail")
+    for f in findings:
+        style = SEVERITY_STYLE.get(f.severity.value, "")
+        evidence = f.evidence or f.detail
+        if len(evidence) > 80:
+            evidence = evidence[:77] + "..."
+        table.add_row(f"[{style}]{f.severity.value}[/]", f.device, f.rule_id, evidence)
+    console.print(table)
+    console.print(
+        Panel(
+            f"total={summary['total']}  "
+            f"critical={summary['critical']}  high={summary['high']}  "
+            f"medium={summary['medium']}  low={summary['low']}"
+        )
+    )
+    return summary
 
 
 @click.group()
@@ -65,12 +207,21 @@ def _store(ctx: click.Context) -> ConfigStore:
     type=click.Path(),
     help="Device inventory YAML",
 )
+@click.option(
+    "--env-file",
+    default=DEFAULT_ENV_FILE,
+    show_default=True,
+    type=click.Path(),
+    help="Dotenv file with credential variables",
+)
 @click.pass_context
-def main(ctx: click.Context, backups: str, inventory: str) -> None:
-    """Network Audit and Config Backup — SSH backup, diff, security audit."""
+def main(ctx: click.Context, backups: str, inventory: str, env_file: str) -> None:
+    """Network Audit and Config Backup - SSH backup, diff, security audit."""
     ctx.ensure_object(dict)
     ctx.obj["backups"] = backups
     ctx.obj["inventory"] = inventory
+    ctx.obj["env_file"] = env_file
+    ctx.obj["env_loaded"] = load_env_file(env_file)
 
 
 @main.command("init")
@@ -86,11 +237,64 @@ def init_cmd(ctx: click.Context, force: bool) -> None:
         console.print(f"[green]Wrote[/] {inv}")
     Path(ctx.obj["backups"]).mkdir(parents=True, exist_ok=True)
     Path("reports").mkdir(parents=True, exist_ok=True)
-    console.print("[green]Ready.[/] Edit inventory.yaml, then run: netaudit backup")
+    console.print(
+        "[green]Ready.[/] Put credentials in .env (see .env.example), "
+        "then run: netaudit backup --dry-run"
+    )
+
+
+@main.command("secrets")
+@click.option("--device", "device_filter", default=None, help="Check one device")
+@click.option("--tag", default=None, help="Check devices carrying this tag")
+@click.pass_context
+def secrets_cmd(ctx: click.Context, device_filter: str | None, tag: str | None) -> None:
+    """Show how each credential resolves (values are never printed)."""
+    devices = _load_devices(ctx, device_filter, tag)
+    _resolved, statuses = resolve_inventory_secrets(devices, allow_prompt=False)
+
+    env_file = ctx.obj["env_file"]
+    loaded = ctx.obj["env_loaded"]
+    if loaded:
+        console.print(f"[dim]Loaded {len(loaded)} variable(s) from {env_file}[/]")
+
+    table = Table(title="Credential resolution")
+    table.add_column("Device")
+    table.add_column("Field")
+    table.add_column("Reference")
+    table.add_column("Source")
+    table.add_column("Status")
+    for status in statuses:
+        style = SOURCE_STYLE.get(status.source, "green")
+        state = "[green]ok[/]" if status.resolved else "[red]unresolved[/]"
+        if status.inline_plaintext:
+            state = "[red]plaintext in inventory[/]"
+        table.add_row(
+            status.device,
+            status.field,
+            status.reference or "-",
+            f"[{style}]{status.source}[/]",
+            f"{state} {status.detail}".strip(),
+        )
+    console.print(table)
+
+    inline = [s for s in statuses if s.inline_plaintext]
+    missing = [s for s in statuses if not s.resolved]
+    if inline:
+        console.print(
+            f"[red]{len(inline)} credential(s) stored as plaintext in the inventory.[/] "
+            "Move them to .env / Credential Manager and use env: or wincred: references."
+        )
+    if missing:
+        console.print(f"[red]{len(missing)} credential(s) unresolved.[/]")
+        sys.exit(1)
+    if inline:
+        sys.exit(1)
+    console.print("[green]All credentials resolve from external stores.[/]")
 
 
 @main.command("backup")
 @click.option("--device", "device_filter", default=None, help="Backup only this device name")
+@click.option("--tag", default=None, help="Backup devices carrying this tag")
 @click.option("--demo", is_flag=True, help="Import sample configs instead of SSH")
 @click.option(
     "--samples",
@@ -99,12 +303,38 @@ def init_cmd(ctx: click.Context, force: bool) -> None:
     show_default=True,
     help="Sample configs dir (with --demo)",
 )
+@click.option(
+    "--dry-run",
+    "dry_run_mode",
+    is_flag=True,
+    help="Validate inventory, credentials and reachability only",
+)
+@click.option("--no-probe", is_flag=True, help="Skip the TCP probe during --dry-run")
+@click.option("--retries", default=2, show_default=True, type=int, help="Retries per device")
+@click.option("--retry-delay", default=5.0, show_default=True, type=float, help="Seconds between retries")
+@click.option("--timeout", default=None, type=int, help="SSH read timeout override (seconds)")
+@click.option("--alert-wazuh-file", "alert_file", default=None, type=click.Path(), help="NDJSON file for failure alerts")
+@click.option("--alert-wazuh-syslog", "alert_syslog", default=None, help="Syslog host for failure alerts")
+@click.option("--alert-wazuh-syslog-port", "alert_port", default=514, show_default=True, type=int)
+@click.option("--alert-wazuh-syslog-proto", "alert_proto", default="udp", type=click.Choice(["udp", "tcp"]))
+@click.option("--json-report", default=None, type=click.Path(), help="Write run report as JSON")
 @click.pass_context
 def backup_cmd(
     ctx: click.Context,
     device_filter: str | None,
+    tag: str | None,
     demo: bool,
     samples: str,
+    dry_run_mode: bool,
+    no_probe: bool,
+    retries: int,
+    retry_delay: float,
+    timeout: int | None,
+    alert_file: str | None,
+    alert_syslog: str | None,
+    alert_port: int,
+    alert_proto: str,
+    json_report: str | None,
 ) -> None:
     """Backup running configs over SSH (or import demo samples)."""
     store = _store(ctx)
@@ -112,7 +342,7 @@ def backup_cmd(
     if demo:
         sample_dir = Path(samples)
         files = sorted(sample_dir.glob("*.cfg")) + sorted(sample_dir.glob("*.txt"))
-        # Skip *-v2.cfg — those are for import-config / diff demos
+        # Skip *-v2.cfg - those are for import-config / diff demos
         files = [f for f in files if not f.stem.endswith("-v2")]
         if not files:
             console.print(f"[red]No sample configs in {sample_dir}[/]")
@@ -127,37 +357,118 @@ def backup_cmd(
             )
         return
 
-    try:
-        devices = load_inventory(ctx.obj["inventory"])
-    except FileNotFoundError:
-        console.print(
-            f"[red]Inventory not found:[/] {ctx.obj['inventory']}\n"
-            "Run [bold]netaudit init[/] first."
+    devices = _load_devices(ctx, device_filter, tag)
+
+    if dry_run_mode:
+        report, _statuses = dry_run(
+            devices,
+            probe=not no_probe,
+            progress=lambda m: console.print(f"  [dim]{m}[/]"),
         )
+        _print_run_report(report)
+        if json_report:
+            _write_json_report(report, json_report)
+        console.print("[dim]Dry run: nothing was written to the config store.[/]")
+        sys.exit(1 if report.fail_count else 0)
+
+    report = run_backups(
+        devices,
+        store,
+        retries=retries,
+        retry_delay=retry_delay,
+        timeout=timeout,
+        alerts=_alert_sink(alert_file, alert_syslog, alert_port, alert_proto),
+        progress=lambda m: console.print(f"  [dim]{m}[/]"),
+    )
+    _print_run_report(report)
+    if json_report:
+        _write_json_report(report, json_report)
+    if report.fail_count:
         sys.exit(1)
 
-    if device_filter:
-        devices = [d for d in devices if d.name == device_filter]
-        if not devices:
-            console.print(f"[red]Device not in inventory:[/] {device_filter}")
-            sys.exit(1)
 
-    ok, fail = 0, 0
-    for device in devices:
-        try:
-            config = backup_device(device, progress=lambda m: console.print(f"  [dim]{m}[/]"))
-            meta = store.save(device.name, config, source="ssh")
-            console.print(
-                f"[green]OK[/] {device.name} -> {meta.path} ({meta.size_bytes} B)"
+@main.command("run")
+@click.option("--device", "device_filter", default=None, help="Limit to one device")
+@click.option("--tag", default=None, help="Limit to devices carrying this tag")
+@click.option("--retries", default=2, show_default=True, type=int)
+@click.option("--retry-delay", default=5.0, show_default=True, type=float)
+@click.option("--timeout", default=None, type=int, help="SSH read timeout override (seconds)")
+@click.option("--rules", "rules_path", default=None, type=click.Path(exists=True))
+@click.option("--report-dir", default="reports", show_default=True, type=click.Path())
+@click.option(
+    "--wazuh-file",
+    default=None,
+    type=click.Path(),
+    help="NDJSON file for findings and run alerts (Wazuh agent localfile)",
+)
+@click.option("--wazuh-syslog", default=None, help="Syslog host for findings and run alerts")
+@click.option("--wazuh-syslog-port", default=514, show_default=True, type=int)
+@click.option("--wazuh-syslog-proto", default="udp", type=click.Choice(["udp", "tcp"]))
+@click.option("--skip-audit", is_flag=True, help="Backup only, no audit stage")
+@click.pass_context
+def run_cmd(
+    ctx: click.Context,
+    device_filter: str | None,
+    tag: str | None,
+    retries: int,
+    retry_delay: float,
+    timeout: int | None,
+    rules_path: str | None,
+    report_dir: str,
+    wazuh_file: str | None,
+    wazuh_syslog: str | None,
+    wazuh_syslog_port: int,
+    wazuh_syslog_proto: str,
+    skip_audit: bool,
+) -> None:
+    """
+    One-shot scheduled cycle: backup with retries, audit, export, alert.
+
+    Exit codes: 0 clean, 1 backup failure, 2 critical/high findings.
+    """
+    store = _store(ctx)
+    devices = _load_devices(ctx, device_filter, tag)
+    alerts = _alert_sink(wazuh_file, wazuh_syslog, wazuh_syslog_port, wazuh_syslog_proto)
+
+    report = run_backups(
+        devices,
+        store,
+        retries=retries,
+        retry_delay=retry_delay,
+        timeout=timeout,
+        alerts=alerts,
+        progress=lambda m: console.print(f"  [dim]{m}[/]"),
+    )
+    _print_run_report(report)
+
+    reports = Path(report_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, int] = {}
+
+    if not skip_audit:
+        backed_up = [r.device for r in report.results if not r.failed]
+        findings = _audit_devices(ctx, store, backed_up, rules_path, None)
+        summary = _print_findings(findings)
+
+        export_findings_markdown(findings, reports / "audit.md")
+        export_findings_csv(findings, reports / "audit.csv")
+        console.print(f"[green]Wrote[/] {reports / 'audit.md'} and {reports / 'audit.csv'}")
+
+        if wazuh_file:
+            export_wazuh_ndjson(findings, wazuh_file)
+            console.print(f"[green]Wazuh NDJSON[/] {wazuh_file} ({len(findings)} finding events)")
+        if wazuh_syslog:
+            sent = send_wazuh_syslog(
+                findings, wazuh_syslog, port=wazuh_syslog_port, protocol=wazuh_syslog_proto
             )
-            ok += 1
-        except SSHBackupError as exc:
-            console.print(f"[red]FAIL[/] {device.name}: {exc}")
-            fail += 1
+            console.print(f"[green]Wazuh syslog[/] {sent} finding events -> {wazuh_syslog}")
 
-    console.print(Panel(f"Backed up [green]{ok}[/] | failed [red]{fail}[/]"))
-    if fail:
+    _write_json_report(report, str(reports / "run-report.json"), extra={"audit": summary})
+
+    if report.fail_count:
         sys.exit(1)
+    if summary.get("critical") or summary.get("high"):
+        sys.exit(2)
 
 
 @main.command("list")
@@ -265,7 +576,7 @@ def audit_cmd(
 ) -> None:
     """Audit configs for dangerous settings and missing standards."""
     store = _store(ctx)
-    findings = []
+    findings: list[Finding] = []
 
     if config_file:
         name = Path(config_file).stem
@@ -279,54 +590,18 @@ def audit_cmd(
         findings.extend(audit_config(name, text, rules, platform=platform))
         console.print(f"[dim]platform={platform or 'all'}[/]")
     else:
-        devices: list[str]
         if device_filter:
-            devices = [device_filter]
+            device_names = [device_filter]
         else:
-            seen = {b.device for b in store.list_backups()}
-            devices = sorted(seen)
-        if not devices:
+            device_names = sorted({b.device for b in store.list_backups()})
+        if not device_names:
             console.print("[yellow]No backups to audit. Run backup --demo or backup first.[/]")
             sys.exit(1)
-        for name in devices:
-            try:
-                _meta, text = store.get(name)
-            except FileNotFoundError as exc:
-                console.print(f"[red]{exc}[/]")
-                continue
-            platform = (
-                platform_override
-                or platform_for_device(ctx.obj["inventory"], name)
-                or infer_platform_from_config(text)
-            )
-            rules = load_rules(rules_path, platform=platform)
-            findings.extend(audit_config(name, text, rules, platform=platform))
+        findings.extend(
+            _audit_devices(ctx, store, device_names, rules_path, platform_override)
+        )
 
-    summary = summarize_findings(findings)
-    table = Table(title="Audit findings")
-    table.add_column("Sev")
-    table.add_column("Device")
-    table.add_column("Rule")
-    table.add_column("Evidence / detail")
-    for f in findings:
-        style = SEVERITY_STYLE.get(f.severity.value, "")
-        evidence = f.evidence or f.detail
-        if len(evidence) > 80:
-            evidence = evidence[:77] + "..."
-        table.add_row(
-            f"[{style}]{f.severity.value}[/]",
-            f.device,
-            f.rule_id,
-            evidence,
-        )
-    console.print(table)
-    console.print(
-        Panel(
-            f"total={summary['total']}  "
-            f"critical={summary['critical']}  high={summary['high']}  "
-            f"medium={summary['medium']}  low={summary['low']}"
-        )
-    )
+    summary = _print_findings(findings)
 
     if export_md:
         export_findings_markdown(findings, export_md)
@@ -342,7 +617,10 @@ def audit_cmd(
         n = send_wazuh_syslog(
             findings, wazuh_syslog, port=wazuh_syslog_port, protocol=wazuh_syslog_proto
         )
-        console.print(f"[green]Wazuh syslog[/] {n} events -> {wazuh_syslog}:{wazuh_syslog_port}/{wazuh_syslog_proto}")
+        console.print(
+            f"[green]Wazuh syslog[/] {n} events -> "
+            f"{wazuh_syslog}:{wazuh_syslog_port}/{wazuh_syslog_proto}"
+        )
     if wazuh_api:
         if not wazuh_pass:
             console.print("[red]--wazuh-api requires --wazuh-pass[/]")
@@ -357,9 +635,80 @@ def audit_cmd(
             console.print(f"[red]Wazuh API[/] {exc}")
             sys.exit(1)
 
-    # Non-zero exit if critical/high — useful in CI / scheduled jobs
+    # Non-zero exit if critical/high - useful in CI / scheduled jobs
     if summary["critical"] or summary["high"]:
         sys.exit(2)
+
+
+@main.command("wazuh-samples")
+@click.option(
+    "--file",
+    "config_file",
+    default="samples/fg-120g-01.cfg",
+    show_default=True,
+    type=click.Path(exists=True),
+    help="Config used to generate representative findings",
+)
+@click.option("--platform", "platform_override", default=None, help="Force platform")
+@click.option(
+    "--out",
+    default="integrations/wazuh/logtest/samples.log",
+    show_default=True,
+    type=click.Path(),
+    help="Where to write syslog-framed sample lines",
+)
+@click.option("--limit", default=5, show_default=True, type=int, help="Max finding events")
+def wazuh_samples_cmd(
+    config_file: str,
+    platform_override: str | None,
+    out: str,
+    limit: int,
+) -> None:
+    """Generate wazuh-logtest sample lines (syslog framing) from a config."""
+    from netaudit.wazuh_integration import operational_event
+
+    text = Path(config_file).read_text(encoding="utf-8")
+    platform = platform_override or infer_platform_from_config(text)
+    rules = load_rules(platform=platform)
+    findings = audit_config(Path(config_file).stem, text, rules, platform=platform)[:limit]
+
+    events = [finding_to_wazuh_event(f) for f in findings]
+    events.append(
+        operational_event(
+            "backup_failed",
+            device=Path(config_file).stem,
+            severity="high",
+            detail=f"Config backup failed for {Path(config_file).stem}: timed out",
+            attempts=3,
+        )
+    )
+    events.append(
+        operational_event(
+            "config_changed",
+            device=Path(config_file).stem,
+            severity="medium",
+            detail=f"Configuration changed on {Path(config_file).stem}",
+            platform=platform or "unknown",
+        )
+    )
+    events.append(
+        operational_event(
+            "run_summary",
+            severity="high",
+            detail="Backup run finished: 2 ok, 1 changed, 1 failed",
+            devices=3,
+            ok=2,
+            changed=1,
+            failed=1,
+        )
+    )
+
+    lines = [format_syslog_line(event, hostname="netaudit-host") for event in events]
+    p = Path(out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Wrote[/] {p} ({len(lines)} sample line(s))")
+    console.print("[dim]Feed it to the manager: integrations/wazuh/logtest/run-logtest.sh[/]")
 
 
 @main.command("show")

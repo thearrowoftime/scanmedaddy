@@ -1,4 +1,4 @@
-"""Wazuh SIEM integration — JSON events for agent logcollector."""
+"""Wazuh SIEM integration - JSON events for agent logcollector and syslog."""
 
 from __future__ import annotations
 
@@ -20,14 +20,24 @@ SEVERITY_TO_LEVEL: dict[str, int] = {
     Severity.INFO.value: 3,
 }
 
+# local0.info - matches the facility documented in integrations/wazuh/README.md
+SYSLOG_PRI = 134
+SYSLOG_TAG = "netaudit"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _envelope(payload: dict[str, Any], source: str = "netaudit") -> dict[str, Any]:
+    return {"timestamp": _now_iso(), "integration": source, "netaudit": payload}
+
 
 def finding_to_wazuh_event(finding: Finding, source: str = "netaudit") -> dict[str, Any]:
     """One NDJSON event consumable by Wazuh JSON decoder / localfile."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    return {
-        "timestamp": now,
-        "integration": source,
-        "netaudit": {
+    return _envelope(
+        {
+            "event_type": "finding",
             "rule_id": finding.rule_id,
             "title": finding.title,
             "severity": finding.severity.value,
@@ -38,22 +48,101 @@ def finding_to_wazuh_event(finding: Finding, source: str = "netaudit") -> dict[s
             "remediation": finding.remediation,
             "wazuh_level": SEVERITY_TO_LEVEL.get(finding.severity.value, 5),
         },
+        source=source,
+    )
+
+
+def operational_event(
+    event_type: str,
+    *,
+    device: str = "",
+    severity: str = Severity.INFO.value,
+    detail: str = "",
+    source: str = "netaudit",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a non-finding event (backup_failed, backup_ok, run_summary, ...)."""
+    payload: dict[str, Any] = {
+        "event_type": event_type,
+        "rule_id": f"NETAUDIT-{event_type.upper().replace('_', '-')}",
+        "title": detail or event_type.replace("_", " ").title(),
+        "severity": severity,
+        "device": device,
+        "detail": detail,
+        "wazuh_level": SEVERITY_TO_LEVEL.get(severity, 5),
     }
+    payload.update({k: v for k, v in extra.items() if v is not None})
+    return _envelope(payload, source=source)
 
 
-def export_wazuh_ndjson(findings: list[Finding], path: str | Path, append: bool = True) -> Path:
-    """
-    Write one JSON object per line (NDJSON).
-
-    Point a Wazuh agent <localfile> with log_format=json at this file.
-    """
+def export_wazuh_events_ndjson(
+    events: list[dict[str, Any]],
+    path: str | Path,
+    append: bool = True,
+) -> Path:
+    """Write raw events as NDJSON (one JSON object per line)."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append and p.exists() else "w"
     with p.open(mode, encoding="utf-8") as fh:
-        for f in findings:
-            fh.write(json.dumps(finding_to_wazuh_event(f), ensure_ascii=False) + "\n")
+        for event in events:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
     return p
+
+
+def export_wazuh_ndjson(findings: list[Finding], path: str | Path, append: bool = True) -> Path:
+    """
+    Write findings as NDJSON.
+
+    Point a Wazuh agent <localfile> with log_format=json at this file.
+    """
+    return export_wazuh_events_ndjson(
+        [finding_to_wazuh_event(f) for f in findings], path, append=append
+    )
+
+
+def format_syslog_line(event: dict[str, Any], hostname: str | None = None) -> str:
+    """
+    Wrap an event in an RFC 3164 syslog frame.
+
+    The header is required so Wazuh pre-decoding can extract the program name
+    (`netaudit`) and hand the JSON body to the decoder in
+    integrations/wazuh/decoders/netaudit_decoders.xml.
+    """
+    host = hostname or socket.gethostname().split(".")[0]
+    stamp = datetime.now().strftime("%b %d %H:%M:%S")
+    if stamp[4] == "0":  # RFC 3164 pads single-digit days with a space
+        stamp = stamp[:4] + " " + stamp[5:]
+    body = json.dumps(event, ensure_ascii=False)
+    return f"<{SYSLOG_PRI}>{stamp} {host} {SYSLOG_TAG}: {body}"
+
+
+def send_wazuh_events_syslog(
+    events: list[dict[str, Any]],
+    host: str,
+    port: int = 514,
+    protocol: str = "udp",
+    hostname: str | None = None,
+) -> int:
+    """Send raw events as syslog-framed JSON. Returns number of messages sent."""
+    proto = protocol.lower()
+    lines = [format_syslog_line(event, hostname=hostname) for event in events]
+    if not lines:
+        return 0
+
+    if proto == "tcp":
+        with socket.create_connection((host, port), timeout=10) as sock:
+            for line in lines:
+                sock.sendall(line.encode("utf-8") + b"\n")
+        return len(lines)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for line in lines:
+            sock.sendto(line.encode("utf-8"), (host, port))
+    finally:
+        sock.close()
+    return len(lines)
 
 
 def send_wazuh_syslog(
@@ -62,29 +151,10 @@ def send_wazuh_syslog(
     port: int = 514,
     protocol: str = "udp",
 ) -> int:
-    """
-    Send findings as syslog-framed JSON to a Wazuh manager / syslog collector.
-
-    Returns number of messages sent.
-    """
-    proto = protocol.lower()
-    sent = 0
-    for f in findings:
-        event = finding_to_wazuh_event(f)
-        # PRI = local0.info (142) — Wazuh can decode JSON body
-        msg = f'<142>netaudit: {json.dumps(event, ensure_ascii=False)}'
-        data = msg.encode("utf-8")
-        if proto == "tcp":
-            with socket.create_connection((host, port), timeout=10) as sock:
-                sock.sendall(data + b"\n")
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                sock.sendto(data, (host, port))
-            finally:
-                sock.close()
-        sent += 1
-    return sent
+    """Send findings as syslog-framed JSON to a Wazuh manager / syslog collector."""
+    return send_wazuh_events_syslog(
+        [finding_to_wazuh_event(f) for f in findings], host, port=port, protocol=protocol
+    )
 
 
 def send_wazuh_api(
@@ -95,20 +165,16 @@ def send_wazuh_api(
     verify_ssl: bool = False,
 ) -> dict[str, Any]:
     """
-    Authenticate to Wazuh API and POST events via the manager log ingest path.
+    Authenticate to the Wazuh API and try to POST events.
 
-    Uses /security/user/authenticate then writes via a temporary approach:
-    posts JSON events to the custom API endpoint if available, otherwise
-    returns a payload you can pipe. Primary production path remains NDJSON+agent.
-
-    For Wazuh 4.x we use PUT-style upload to agents is limited; this helper
-    authenticates and posts each event to `/events` when the manager supports it,
-    falling back to documenting the NDJSON path on failure.
+    Wazuh 4.x has no universal REST endpoint for injecting arbitrary JSON, so
+    this is a connectivity/credential check first and an ingest attempt second.
+    The supported ingest paths stay NDJSON + agent localfile, or syslog.
     """
     base = base_url.rstrip("/")
-    # Basic auth -> JWT
     auth_url = f"{base}/security/user/authenticate"
     req = request.Request(auth_url, method="GET")
+
     import base64
 
     token_hdr = base64.b64encode(f"{user}:{password}".encode()).decode()
@@ -118,7 +184,7 @@ def send_wazuh_api(
     if not verify_ssl:
         import ssl
 
-        ctx = ssl._create_unverified_context()  # noqa: S323 — lab/homelab convenience
+        ctx = ssl._create_unverified_context()  # noqa: S323 - self-signed manager certs
 
     try:
         with request.urlopen(req, context=ctx, timeout=30) as resp:
@@ -131,9 +197,6 @@ def send_wazuh_api(
     except error.URLError as exc:
         raise RuntimeError(f"Wazuh API unreachable: {exc.reason}") from exc
 
-    # Wazuh has no universal "inject alert" REST for arbitrary JSON in all versions.
-    # We POST to a manager-side script-friendly endpoint: archive via syslog is preferred.
-    # Attempt /events (Cloud / some builds); on 404 return token-ok + advise NDJSON.
     events = [finding_to_wazuh_event(f) for f in findings]
     events_url = f"{base}/events"
     payload = json.dumps({"events": events}).encode("utf-8")

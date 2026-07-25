@@ -1,17 +1,50 @@
-# Drop into Wazuh agent ossec.conf (or shared agent config)
-# Monitors netaudit NDJSON findings for FortiGate / SCALANCE / Cisco audits.
+<!--
+  Wazuh AGENT configuration. Add to ossec.conf (or push via shared agent.conf).
+  Reads the NDJSON file produced by the "wazuh-file" option of
+  "netaudit audit" or "netaudit run", for example:
+      C:\ProgramData\netaudit\wazuh-netaudit.json
 
+  Restart the agent afterwards:
+      Windows: Restart-Service -Name WazuhSvc
+      Linux:   sudo systemctl restart wazuh-agent
+-->
 <ossec_config>
+
+  <!-- Windows agent -->
   <localfile>
     <log_format>json</log_format>
-    <!-- Windows example — adjust to your path -->
-    <location>C:\Users\marci\Projects\network-audit-backup\reports\wazuh-netaudit.json</location>
+    <location>C:\ProgramData\netaudit\wazuh-netaudit.json</location>
   </localfile>
 
-  <!-- Linux example:
-  <localfile>
-    <log_format>json</log_format>
-    <location>/var/log/netaudit/wazuh-netaudit.json</location>
-  </localfile>
-  -->
+  <!-- Linux agent: swap the location above for /var/log/netaudit/wazuh-netaudit.json -->
+
 </ossec_config>
+
+<!--
+  Wazuh MANAGER configuration. The manager loads etc/decoders and etc/rules by
+  default, so installing the files is normally enough:
+
+      sudo install -o wazuh -g wazuh -m 0640 decoders/netaudit_decoders.xml /var/ossec/etc/decoders/
+      sudo install -o wazuh -g wazuh -m 0640 rules/netaudit_rules.xml /var/ossec/etc/rules/
+      sudo systemctl restart wazuh-manager
+
+  Only needed if your ruleset block was trimmed:
+
+  <ossec_config>
+    <ruleset>
+      <decoder_dir>etc/decoders</decoder_dir>
+      <rule_dir>etc/rules</rule_dir>
+    </ruleset>
+  </ossec_config>
+
+  For the syslog transport also allow the sender on the manager:
+
+  <ossec_config>
+    <remote>
+      <connection>syslog</connection>
+      <port>514</port>
+      <protocol>udp</protocol>
+      <allowed-ips>192.168.1.0/24</allowed-ips>
+    </remote>
+  </ossec_config>
+-->

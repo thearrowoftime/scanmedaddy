@@ -1,0 +1,20 @@
+<!--
+  netaudit decoder (syslog transport)
+
+  Install on the Wazuh manager:
+    sudo install -o wazuh -g wazuh -m 0640 netaudit_decoders.xml
+      /var/ossec/etc/decoders/netaudit_decoders.xml
+    sudo systemctl restart wazuh-manager
+
+  Matches lines produced by the "wazuh-syslog" option of netaudit, which are
+  RFC 3164 framed:
+    <134>Jul 25 17:30:00 host netaudit: {"timestamp":"...","integration":"netaudit",...}
+
+  The file transport ("wazuh-file" option plus an agent localfile with
+  log_format=json) does NOT need this decoder. Wazuh's built-in JSON decoder
+  already handles it.
+-->
+<decoder name="netaudit">
+  <program_name>^netaudit$</program_name>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

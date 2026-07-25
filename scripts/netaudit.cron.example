@@ -1,0 +1,19 @@
+# /etc/cron.d/netaudit  (company-internal scheduled config backup)
+#
+# Install:
+#   sudo install -m 0644 scripts/netaudit.cron.example /etc/cron.d/netaudit
+#   sudo mkdir -p /var/log/netaudit && sudo chown netaudit /var/log/netaudit
+#
+# Credentials come from the environment, so give the service account a
+# root-owned .env (chmod 600) inside PROJECT_ROOT.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PROJECT_ROOT=/opt/netaudit
+WAZUH_FILE=/var/log/netaudit/wazuh-netaudit.json
+
+# Daily full run at 02:30
+30 2 * * * netaudit /opt/netaudit/scripts/scheduled-backup.sh >> /var/log/netaudit/cron.log 2>&1
+
+# Hourly dry run so credential/reachability breakage is caught before the nightly window
+15 * * * * netaudit cd /opt/netaudit && .venv/bin/python -m netaudit.cli backup --dry-run --json-report reports/dry-run.json >> /var/log/netaudit/dry-run.log 2>&1
