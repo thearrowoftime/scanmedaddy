@@ -36,13 +36,44 @@ Production: **FortiGate 120G**, **SCALANCE XC208**, alert export to SIEM.
 | `scalance_xc` / `scalance` | **SCALANCE XC208** (XC-200) | `show running-config` |
 | `cisco_ios` / `cisco_asa` | Cisco | `show running-config` |
 
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `netaudit init` | Create an example `inventory.yaml` and the folder layout |
+| `netaudit backup` | Pull configs over SSH (`--dry-run` validates, `--demo` imports the samples) |
+| `netaudit run` | Unattended cycle: backup, audit, export, alert |
+| `netaudit respond` | Alert-triggered backup + diff + audit (used by Wazuh active response) |
+| `netaudit diff` | Unified diff between two snapshots |
+| `netaudit audit` | Security and standards findings, including firmware level |
+| `netaudit baseline` | Drift from an approved golden config |
+| `netaudit compliance` | Score per device with trend, mapped to CIS / IEC 62443 |
+| `netaudit facts` | Model, firmware, serial, VLANs, interfaces, admins |
+| `netaudit secrets` | Show how every credential resolves, without printing values |
+| `netaudit hostkeys` | List pinned SSH host keys, `--forget` one after a replacement |
+| `netaudit list` / `show` | Browse stored snapshots |
+| `netaudit import-config` | Store a local config file as a snapshot |
+| `netaudit wazuh-samples` | Generate `wazuh-logtest` input lines |
+
+Exit codes are meant for schedulers and pipelines:
+
+| Command | 0 | 1 | 2 | 3 |
+|---------|---|---|---|---|
+| `backup` | all devices backed up | a backup failed | - | - |
+| `run` | clean | a backup failed | critical/high findings | - |
+| `respond` | no change | backup failed | critical/high findings | config changed |
+| `audit` / `baseline` | no serious findings | nothing to audit | critical/high findings | - |
+| `compliance` | above the threshold | no backups yet | below `--min-score` | - |
+| `secrets` | everything resolves | unresolved or hardcoded credential | - | - |
+
 ## Quick start (demo without hardware)
 
 ```powershell
-cd C:\Users\marci\Projects\network-audit-backup
+git clone https://github.com/thearrowoftime/scanmedaddy.git
+cd scanmedaddy
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
-pip install pytest
+pip install -e ".[dev]"
 
 netaudit backup --demo
 
@@ -331,3 +362,16 @@ Manual on-the-wire check of the syslog transport:
 ```powershell
 python tests\manual\verify_syslog_receive.py
 ```
+
+## Repository layout
+
+| Path | Contents |
+|------|----------|
+| `netaudit/` | Package: SSH backup, store, diff, audit, facts, baseline, compliance, Wazuh, CLI |
+| `netaudit/rules/` | Audit rule packs, firmware minimums, framework mapping |
+| `baselines/` | Example golden configs and profiles for FortiGate and SCALANCE |
+| `samples/` | Intentionally insecure sample configs used by the demo and tests |
+| `scripts/` | Task Scheduler and cron wrappers |
+| `integrations/wazuh/` | Decoder, rules, active response, dashboard queries, logtest harness |
+| `tests/` | Test suite, including the in-process fake SSH server |
+| `backups/`, `reports/`, `.netaudit/` | Runtime output: snapshots, reports, pinned host keys (git-ignored) |
