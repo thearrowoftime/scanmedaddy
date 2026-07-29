@@ -48,12 +48,21 @@ devices:
     port: 22
     tags: [edge, fortigate, lab]
 
+  # Key auth and a bastion: the usual shape for an OT segment.
+  # key_file replaces the password; key_passphrase is resolved like any secret.
   - name: scalance-xc208-01
     host: 192.168.20.10
     device_type: switch
     platform: scalance_xc
     username: admin
     password: env:SCALANCE_XC208_01_PASSWORD
+    # key_file: ~/.ssh/id_ed25519
+    # key_passphrase: env:SSH_KEY_PASSPHRASE
+    # jump:
+    #   host: 10.0.0.5
+    #   port: 22
+    #   username: netops
+    #   password: env:JUMP_PASSWORD
     port: 22
     tags: [ot, siemens, lab]
 

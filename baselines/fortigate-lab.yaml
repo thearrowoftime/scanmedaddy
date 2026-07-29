@@ -1,0 +1,23 @@
+# Example baseline profile for FortiGate (FortiOS).
+#
+# Only the sections listed below are compared with the golden config, so
+# per-device values never show up as drift. Point `golden` at the config of a
+# device you have reviewed and approved, or at a hand-written template.
+#
+#   netaudit baseline --profile baselines/fortigate-lab.yaml
+
+name: fortigate-lab
+platforms: [fortigate, fortios]
+golden: fortigate-lab-golden.cfg
+style: fortios
+severity: medium
+
+sections:
+  - '(?i)^config system global\b'
+  - '(?i)^config system ntp\b'
+  - '(?i)^config log syslogd setting\b'
+  - '(?i)^config system snmp sysinfo\b'
+
+# Device-specific values that must not count as drift
+ignore:
+  - '(?i)^\s*set\s+(hostname|ip|serial-number|alias)\b'

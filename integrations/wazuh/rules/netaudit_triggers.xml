@@ -1,0 +1,49 @@
+<!--
+  Trigger rules for the netaudit active response.
+
+  These do not match netaudit events. They match the devices telling Wazuh that
+  someone touched their configuration, which is what makes an immediate backup
+  worth doing. Wire the ids into the active-response block:
+
+    <rules_id>100580,100581,100582,100550</rules_id>
+
+  Install:
+    sudo install -o wazuh -g wazuh -m 0640 netaudit_triggers.xml \
+      /var/ossec/etc/rules/netaudit_triggers.xml
+    sudo systemctl restart wazuh-manager
+
+  Field names in FortiOS logs vary between versions and log formats. Validate
+  against your own logs before relying on them:
+    /var/ossec/bin/wazuh-logtest
+  If a field does not decode, match on the raw text with <match> instead.
+-->
+<group name="netaudit,config_changed,">
+
+  <!-- FortiOS event log: an administrator changed a configuration object. -->
+  <rule id="100580" level="7">
+    <decoded_as>fortigate-firewall-v5</decoded_as>
+    <field name="logdesc">configured</field>
+    <description>FortiGate configuration changed by $(user) on $(devname) - netaudit will pull a fresh backup</description>
+    <group>config_changed,</group>
+  </rule>
+
+  <!-- Same intent, matched on the raw log for setups where logdesc is absent. -->
+  <rule id="100581" level="7">
+    <decoded_as>fortigate-firewall-v5</decoded_as>
+    <match>subtype="system"</match>
+    <regex>cfgpath=|cfgattr=</regex>
+    <description>FortiGate system configuration attribute changed - netaudit will pull a fresh backup</description>
+    <group>config_changed,</group>
+  </rule>
+
+  <!--
+    Cisco IOS / SCALANCE with Cisco-style syslog: configuration was saved or
+    changed from a session. This signature is stable across releases.
+  -->
+  <rule id="100582" level="7">
+    <match>%SYS-5-CONFIG_I|%SYS-6-CFG_CHG|configuration changed</match>
+    <description>Network device configuration changed - netaudit will pull a fresh backup</description>
+    <group>config_changed,</group>
+  </rule>
+
+</group>

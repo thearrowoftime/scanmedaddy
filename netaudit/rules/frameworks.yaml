@@ -1,0 +1,127 @@
+# Indicative mapping of netaudit rules to control frameworks.
+#
+#   cis       - CIS Controls v8 safeguards
+#   iec62443  - IEC 62443-3-3 system requirements (relevant for OT / SCALANCE)
+#
+# This mapping is meant to steer remediation and to give an auditor a starting
+# point. It is not a certification and it is not a substitute for reading the
+# standards. Add your own rules and controls freely - anything unmapped is
+# listed by `netaudit compliance` so gaps stay visible.
+
+mappings:
+  # --- Segmentation and filtering -----------------------------------------
+  ACL-PERMIT-ANY:
+    cis: ["13.4", "12.2"]
+    iec62443: ["SR 5.1"]
+  ACL-PERMIT-ANY-EXTENDED:
+    cis: ["13.4", "12.2"]
+    iec62443: ["SR 5.1"]
+  FG-POLICY-ANY-ANY:
+    cis: ["13.4", "12.2"]
+    iec62443: ["SR 5.1", "SR 5.2"]
+  SC-ACL-PERMIT-ANY:
+    cis: ["13.4"]
+    iec62443: ["SR 5.1"]
+
+  # --- Management protocols and credentials -------------------------------
+  TELNET-ENABLED:
+    cis: ["4.6", "12.6"]
+    iec62443: ["SR 1.13", "SR 3.1", "SR 4.1"]
+  SC-TELNET-ENABLED:
+    cis: ["4.6", "12.6"]
+    iec62443: ["SR 1.13", "SR 3.1", "SR 4.1"]
+  FG-TELNET-ADMIN:
+    cis: ["4.6", "12.6"]
+    iec62443: ["SR 1.13", "SR 3.1", "SR 4.1"]
+  HTTP-SERVER:
+    cis: ["4.6", "4.8"]
+    iec62443: ["SR 3.1", "SR 4.1"]
+  SC-HTTP-ENABLED:
+    cis: ["4.6", "4.8"]
+    iec62443: ["SR 3.1", "SR 4.1"]
+  FG-HTTP-ADMIN:
+    cis: ["4.6", "12.6"]
+    iec62443: ["SR 3.1", "SR 4.1"]
+  ENABLE-PASSWORD-WEAK:
+    cis: ["5.2", "4.7"]
+    iec62443: ["SR 1.5", "SR 1.7"]
+  SC-NO-PASSWORD-COMPLEXITY:
+    cis: ["5.2"]
+    iec62443: ["SR 1.7"]
+  NO-SERVICE-PASSWORD-ENCRYPT:
+    cis: ["3.11"]
+    iec62443: ["SR 4.1"]
+  VTY-NO-ACL:
+    cis: ["12.8", "4.2"]
+    iec62443: ["SR 1.13", "SR 2.1"]
+  FG-ADMIN-TRUSTHOST-MISSING:
+    cis: ["12.8", "4.2"]
+    iec62443: ["SR 1.13", "SR 2.1"]
+  FG-SSL-VPN-ANY:
+    cis: ["6.4", "12.7"]
+    iec62443: ["SR 1.13", "SR 2.1"]
+
+  # --- Monitoring, SNMP, logging and time ---------------------------------
+  SNMP-WEAK-COMMUNITY:
+    cis: ["4.6", "12.6", "5.2"]
+    iec62443: ["SR 1.5", "SR 4.1"]
+  SNMP-RW:
+    cis: ["4.6", "5.4"]
+    iec62443: ["SR 2.1"]
+  SNMP-MISSING:
+    cis: ["8.11", "12.6"]
+    iec62443: ["SR 6.2"]
+  FG-SNMP-WEAK:
+    cis: ["4.6", "12.6", "5.2"]
+    iec62443: ["SR 1.5", "SR 4.1"]
+  FG-SNMP-MISSING:
+    cis: ["8.11", "12.6"]
+    iec62443: ["SR 6.2"]
+  SC-SNMP-WEAK:
+    cis: ["4.6", "12.6", "5.2"]
+    iec62443: ["SR 1.5", "SR 4.1"]
+  SC-SNMP-MISSING:
+    cis: ["8.11", "12.6"]
+    iec62443: ["SR 6.2"]
+  SYSLOG-MISSING:
+    cis: ["8.2", "8.5"]
+    iec62443: ["SR 6.1"]
+  FG-SYSLOG-MISSING:
+    cis: ["8.2", "8.5"]
+    iec62443: ["SR 6.1"]
+  SC-SYSLOG-MISSING:
+    cis: ["8.2", "8.5"]
+    iec62443: ["SR 6.1"]
+  NTP-MISSING:
+    cis: ["8.4"]
+    iec62443: ["SR 2.11"]
+  FG-NTP-MISSING:
+    cis: ["8.4"]
+    iec62443: ["SR 2.11"]
+  SC-NTP-MISSING:
+    cis: ["8.4"]
+    iec62443: ["SR 2.11"]
+
+  # --- Unnecessary services ------------------------------------------------
+  CDP-ENABLED:
+    cis: ["4.8"]
+    iec62443: ["SR 7.7"]
+
+  # --- Patch level (netaudit/rules/firmware.yaml) --------------------------
+  FW-OUTDATED:
+    cis: ["7.3", "7.4", "12.1"]
+    iec62443: ["SR 7.6"]
+  FW-UNKNOWN:
+    cis: ["1.1", "2.1"]
+    iec62443: ["SR 7.6"]
+
+  # --- Golden config drift (netaudit baseline) -----------------------------
+  BASELINE-DRIFT:
+    cis: ["4.1", "4.2"]
+    iec62443: ["SR 7.6"]
+  BASELINE-MISSING:
+    cis: ["4.1", "4.2"]
+    iec62443: ["SR 7.6"]
+  BASELINE-EXTRA:
+    cis: ["4.1", "4.8"]
+    iec62443: ["SR 7.6"]

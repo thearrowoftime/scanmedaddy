@@ -3,16 +3,30 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
+from netaudit.audit import audit_config, load_rules
+from netaudit.diff import diff_backups, format_diff_markdown
+from netaudit.facts import extract_facts, firmware_findings
 from netaudit.models import Device, Severity
 from netaudit.secrets import SecretStatus, resolve_device_secrets
-from netaudit.ssh_backup import SSHBackupError, backup_device, check_reachable
+from netaudit.ssh_backup import (
+    DEFAULT_KNOWN_HOSTS,
+    HostKeyEvent,
+    HostKeyMismatch,
+    HostKeyUnknown,
+    SSHBackupError,
+    backup_device,
+    check_reachable,
+    is_host_pinned,
+)
 from netaudit.store import ConfigStore
 from netaudit.wazuh_integration import (
     export_wazuh_events_ndjson,
+    finding_to_wazuh_event,
     operational_event,
     send_wazuh_events_syslog,
 )
@@ -115,13 +129,16 @@ def dry_run(
     *,
     probe: bool = True,
     probe_timeout: float = 5.0,
+    known_hosts: str | None = str(DEFAULT_KNOWN_HOSTS),
+    strict_host_keys: bool = False,
     progress: ProgressFn | None = None,
 ) -> tuple[RunReport, list[SecretStatus]]:
     """
     Validate a scheduled run without touching the config store.
 
     Checks inventory completeness, resolves credentials (values are never
-    printed), and optionally TCP-probes each device.
+    printed), reports whether the host key is pinned, and optionally TCP-probes
+    each device.
     """
     log = progress or (lambda _m: None)
     report = RunReport(started_at=_now(), mode="dry-run")
@@ -136,8 +153,21 @@ def dry_run(
             problems.append("username missing in inventory")
 
         detail_parts: list[str] = []
+        pinned = is_host_pinned(device.host, device.port, known_hosts)
+        detail_parts.append("host key pinned" if pinned else "host key not pinned")
+        if strict_host_keys and not pinned:
+            problems.append(
+                f"host key for {device.host}:{device.port} is not pinned in {known_hosts}"
+            )
+        if device.jump is not None:
+            detail_parts.append(f"via {device.jump.label}")
+
         if probe and not problems:
-            reachable, probe_detail = check_reachable(resolved, timeout=probe_timeout)
+            target = device.jump.host if device.jump is not None else device.host
+            target_port = device.jump.port if device.jump is not None else device.port
+            reachable, probe_detail = check_reachable(
+                replace(resolved, host=target, port=target_port), timeout=probe_timeout
+            )
             detail_parts.append(probe_detail)
             if not reachable:
                 problems.append(probe_detail)
@@ -168,6 +198,9 @@ def backup_with_retry(
     retries: int = 2,
     retry_delay: float = 5.0,
     timeout: int | None = None,
+    known_hosts: str | None = str(DEFAULT_KNOWN_HOSTS),
+    strict_host_keys: bool = False,
+    on_host_key: Callable[[HostKeyEvent], None] | None = None,
     progress: ProgressFn | None = None,
 ) -> DeviceResult:
     """Back up one device, retrying transient SSH failures."""
@@ -194,7 +227,14 @@ def backup_with_retry(
     while attempts < total_tries:
         attempts += 1
         try:
-            config = backup_device(resolved, timeout=timeout, progress=log)
+            config = backup_device(
+                resolved,
+                timeout=timeout,
+                progress=log,
+                known_hosts=known_hosts,
+                strict_host_keys=strict_host_keys,
+                on_host_key=on_host_key,
+            )
             meta = store.save(device.name, config, source="ssh")
             changed = previous is None or previous.sha256 != meta.sha256
             return DeviceResult(
@@ -205,6 +245,16 @@ def backup_with_retry(
                 path=meta.path,
                 size_bytes=meta.size_bytes,
                 changed=changed,
+            )
+        except (HostKeyMismatch, HostKeyUnknown) as exc:
+            # A key problem is never transient: retrying only hides it.
+            log(f"{device.name}: {exc}")
+            return DeviceResult(
+                device=device.name,
+                platform=device.platform,
+                status="blocked",
+                attempts=attempts,
+                error=str(exc),
             )
         except SSHBackupError as exc:
             last_error = str(exc)
@@ -223,6 +273,201 @@ def backup_with_retry(
     )
 
 
+@dataclass
+class RespondReport:
+    """Outcome of an alert-triggered backup (Wazuh Active Response)."""
+
+    device: str
+    triggered_by: str = ""
+    agent: str = ""
+    status: str = "unchanged"  # unchanged | changed | failed | blocked
+    attempts: int = 0
+    added: int = 0
+    removed: int = 0
+    findings: int = 0
+    serious_findings: int = 0
+    error: str = ""
+    diff_markdown: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return self.status == "changed"
+
+    @property
+    def failed(self) -> bool:
+        return self.status in ("failed", "blocked")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data.pop("diff_markdown", None)
+        data.pop("events", None)
+        data["changed"] = self.changed
+        return data
+
+
+def respond_to_alert(
+    device: Device,
+    store: ConfigStore,
+    *,
+    triggered_by: str = "",
+    agent: str = "",
+    retries: int = 1,
+    retry_delay: float = 2.0,
+    timeout: int | None = None,
+    known_hosts: str | None = str(DEFAULT_KNOWN_HOSTS),
+    strict_host_keys: bool = False,
+    rules_path: str | None = None,
+    platform: str | None = None,
+    firmware_policy: dict[str, Any] | None = None,
+    alerts: AlertSink | None = None,
+    progress: ProgressFn | None = None,
+) -> RespondReport:
+    """
+    Pull a fresh config because something happened, then say what changed.
+
+    This is the reverse direction from scheduled runs: Wazuh sees a config
+    change on the device (or netaudit's own host key alert) and asks netaudit for
+    evidence right away, instead of waiting for the next nightly backup.
+    """
+    log = progress or (lambda _m: None)
+    report = RespondReport(device=device.name, triggered_by=triggered_by, agent=agent)
+
+    result = backup_with_retry(
+        device,
+        store,
+        retries=retries,
+        retry_delay=retry_delay,
+        timeout=timeout,
+        known_hosts=known_hosts,
+        strict_host_keys=strict_host_keys,
+        on_host_key=lambda ev: report.events.append(_host_key_event(ev)),
+        progress=log,
+    )
+    report.attempts = result.attempts
+
+    if result.failed:
+        report.status = result.status
+        report.error = result.error
+        report.events.append(
+            operational_event(
+                "respond_failed",
+                device=device.name,
+                severity=Severity.HIGH.value,
+                detail=f"Alert-triggered backup failed for {device.name}: {result.error}",
+                platform=device.platform,
+                triggered_by=triggered_by,
+                agent=agent,
+                attempts=result.attempts,
+            )
+        )
+        _emit(report.events, alerts)
+        return report
+
+    report.status = "changed" if result.changed else "unchanged"
+
+    if result.changed:
+        try:
+            diff = diff_backups(store, device.name)
+        except FileNotFoundError:
+            diff = None
+        if diff is not None:
+            report.added = len(diff.added)
+            report.removed = len(diff.removed)
+            report.diff_markdown = format_diff_markdown(diff)
+        report.events.append(
+            operational_event(
+                "config_changed",
+                device=device.name,
+                severity=Severity.MEDIUM.value,
+                detail=(
+                    f"Configuration changed on {device.name} "
+                    f"({report.added} added, {report.removed} removed)"
+                ),
+                platform=device.platform,
+                path=result.path,
+                added_lines=report.added,
+                removed_lines=report.removed,
+                added_sample=[ln.strip() for ln in (diff.added[:10] if diff else [])],
+                removed_sample=[ln.strip() for ln in (diff.removed[:10] if diff else [])],
+                triggered_by=triggered_by,
+                agent=agent,
+            )
+        )
+
+    _meta, config = store.get(device.name)
+    effective_platform = platform or device.platform
+    rules = load_rules(rules_path, platform=effective_platform)
+    findings = audit_config(device.name, config, rules, platform=effective_platform)
+    if firmware_policy is not None:
+        facts = extract_facts(device.name, config, effective_platform)
+        findings.extend(firmware_findings(facts, firmware_policy))
+
+    report.findings = len(findings)
+    report.serious_findings = sum(
+        1 for f in findings if f.severity in (Severity.CRITICAL, Severity.HIGH)
+    )
+    report.events.extend(finding_to_wazuh_event(f) for f in findings)
+    report.events.append(
+        operational_event(
+            "respond_summary",
+            device=device.name,
+            severity=Severity.MEDIUM.value if result.changed else Severity.INFO.value,
+            detail=(
+                f"Alert-triggered backup of {device.name}: {report.status}, "
+                f"{report.findings} finding(s), {report.serious_findings} critical/high"
+            ),
+            platform=device.platform,
+            triggered_by=triggered_by,
+            agent=agent,
+            changed=result.changed,
+            findings_total=report.findings,
+            findings_serious=report.serious_findings,
+        )
+    )
+    _emit(report.events, alerts)
+    return report
+
+
+def _emit(events: list[dict[str, Any]], alerts: AlertSink | None) -> None:
+    if alerts is not None and events:
+        alerts.emit(events)
+
+
+def _host_key_event(event: HostKeyEvent) -> dict[str, Any]:
+    """Turn a host key observation into a Wazuh event."""
+    if event.status == "mismatch":
+        return operational_event(
+            "host_key_changed",
+            device=event.device,
+            severity=Severity.CRITICAL.value,
+            detail=(
+                f"SSH host key for {event.target} changed: pinned {event.expected}, "
+                f"got {event.fingerprint}"
+            ),
+            target=event.target,
+            fingerprint=event.fingerprint,
+            expected_fingerprint=event.expected,
+        )
+    if event.status == "unknown":
+        return operational_event(
+            "host_key_unpinned",
+            device=event.device,
+            severity=Severity.MEDIUM.value,
+            detail=f"SSH host key for {event.target} is not pinned ({event.fingerprint})",
+            target=event.target,
+            fingerprint=event.fingerprint,
+        )
+    return operational_event(
+        "host_key_learned",
+        device=event.device,
+        severity=Severity.INFO.value,
+        detail=f"Pinned SSH host key for {event.target} ({event.fingerprint})",
+        target=event.target,
+        fingerprint=event.fingerprint,
+    )
+
+
 def run_backups(
     devices: list[Device],
     store: ConfigStore,
@@ -230,6 +475,8 @@ def run_backups(
     retries: int = 2,
     retry_delay: float = 5.0,
     timeout: int | None = None,
+    known_hosts: str | None = str(DEFAULT_KNOWN_HOSTS),
+    strict_host_keys: bool = False,
     alerts: AlertSink | None = None,
     progress: ProgressFn | None = None,
 ) -> RunReport:
@@ -244,6 +491,9 @@ def run_backups(
             retries=retries,
             retry_delay=retry_delay,
             timeout=timeout,
+            known_hosts=known_hosts,
+            strict_host_keys=strict_host_keys,
+            on_host_key=lambda ev: events.append(_host_key_event(ev)),
             progress=progress,
         )
         report.results.append(result)

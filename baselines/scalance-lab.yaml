@@ -1,0 +1,19 @@
+# Example baseline profile for SCALANCE XC-200 series (OT access switches).
+#
+#   netaudit baseline --profile baselines/scalance-lab.yaml
+
+name: scalance-lab
+platforms: [scalance, scalance_xc]
+golden: scalance-lab-golden.cfg
+style: indent
+severity: medium
+
+sections:
+  - '(?i)^line vty\b'
+  - '(?i)^logging host\b'
+  - '(?i)^sntp server\b'
+  - '(?i)^snmp-server\b'
+
+ignore:
+  - '(?i)^\s*ip address\b'
+  - '(?i)^hostname\b'

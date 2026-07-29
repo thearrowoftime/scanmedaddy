@@ -31,7 +31,7 @@ def main() -> int:
         while True:
             try:
                 data, _addr = sock.recvfrom(65535)
-            except socket.timeout:
+            except TimeoutError:
                 return
             received.append(data.decode("utf-8"))
 

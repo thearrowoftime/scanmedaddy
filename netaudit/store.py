@@ -51,8 +51,16 @@ class ConfigStore:
         if latest and latest.sha256 == digest:
             return latest  # unchanged — reuse existing
 
-        filename = f"{ts}.cfg"
-        path = device_dir / filename
+        # Two snapshots inside the same second (a scheduled run and an
+        # alert-triggered one, say) must not overwrite each other. The suffix is
+        # appended so timestamps keep sorting oldest to newest as plain strings.
+        base_ts = ts
+        path = device_dir / f"{ts}.cfg"
+        collision = 0
+        while path.exists():
+            collision += 1
+            ts = f"{base_ts}{collision}"
+            path = device_dir / f"{ts}.cfg"
         path.write_text(config, encoding="utf-8", newline="\n")
 
         meta = BackupMeta(

@@ -1,0 +1,22 @@
+# Minimum accepted firmware per platform.
+#
+# Keep these in step with vendor advisories - FortiGuard PSIRT for FortiOS and
+# Siemens ProductCERT for SCALANCE - and with whatever your change board has
+# actually approved for production. A device below the minimum is reported as a
+# finding by `netaudit audit` and shipped to Wazuh like any other finding.
+#
+# Override the file with: netaudit audit --firmware-policy my-policy.yaml
+
+minimum:
+  fortigate: "7.2.9"
+  fortios: "7.2.9"
+  scalance: "4.5"
+  scalance_xc: "4.5"
+  cisco_ios: "15.2"
+
+policy:
+  rule_id: FW-OUTDATED
+  severity: high
+  unknown_rule_id: FW-UNKNOWN
+  unknown_severity: low
+  reference: FortiGuard PSIRT / Siemens ProductCERT advisories

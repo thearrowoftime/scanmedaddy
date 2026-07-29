@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from netaudit.audit import summarize_findings
+from netaudit.compliance import ControlStatus, DeviceScore, overall_score, trend
 from netaudit.diff import DiffResult, format_diff_markdown
 from netaudit.models import Finding
 
@@ -50,8 +51,8 @@ def export_findings_markdown(
         "",
         "## Summary",
         "",
-        f"| Severity | Count |",
-        f"|----------|------:|",
+        "| Severity | Count |",
+        "|----------|------:|",
         f"| critical | {summary['critical']} |",
         f"| high | {summary['high']} |",
         f"| medium | {summary['medium']} |",
@@ -80,6 +81,111 @@ def export_findings_markdown(
             lines.append("")
 
     p.write_text("\n".join(lines), encoding="utf-8")
+    return p
+
+
+def export_compliance_markdown(
+    scores: list[DeviceScore],
+    controls: list[ControlStatus],
+    path: str | Path,
+    *,
+    findings: list[Finding] | None = None,
+    history: list[dict] | None = None,
+    unmapped: list[str] | None = None,
+) -> Path:
+    """Management-facing report: score per device, then control coverage."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines: list[str] = [
+        "# Network Compliance Report",
+        "",
+        f"_Generated: {now}_",
+        "",
+        f"**Overall score: {overall_score(scores)}/100**",
+        "",
+        "## Score per device",
+        "",
+        "| Device | Score | Grade | Change | Critical | High | Medium | Low |",
+        "|--------|------:|:-----:|-------:|---------:|-----:|-------:|----:|",
+    ]
+    for score in scores:
+        delta = "-" if score.delta is None else f"{score.delta:+d}"
+        lines.append(
+            f"| `{score.device}` | {score.score} | {score.grade} | {delta} | "
+            f"{score.counts.get('critical', 0)} | {score.counts.get('high', 0)} | "
+            f"{score.counts.get('medium', 0)} | {score.counts.get('low', 0)} |"
+        )
+
+    if history:
+        lines += ["", "## Trend", "", "| Run | Overall |", "|-----|--------:|"]
+        for timestamp, value in trend(history):
+            lines.append(f"| {timestamp} | {value} |")
+
+    lines += [
+        "",
+        "## Control coverage",
+        "",
+        "Indicative mapping to CIS Controls v8 and IEC 62443-3-3. Controls listed",
+        "here have at least one open finding.",
+        "",
+        "| Framework | Control | Worst | Findings | Devices | Rules |",
+        "|-----------|---------|-------|---------:|---------|-------|",
+    ]
+    if not controls:
+        lines.append("| - | no mapped findings | - | 0 | - | - |")
+    for control in controls:
+        lines.append(
+            f"| {control.framework} | {control.control} | {control.worst.value} | "
+            f"{control.findings} | {', '.join(f'`{d}`' for d in control.devices)} | "
+            f"{', '.join(control.rules)} |"
+        )
+
+    if unmapped:
+        lines += [
+            "",
+            "## Unmapped rules",
+            "",
+            "These rules produced findings but have no framework mapping yet:",
+            "",
+            ", ".join(f"`{rule}`" for rule in unmapped),
+        ]
+
+    if findings:
+        summary = summarize_findings(findings)
+        lines += [
+            "",
+            "## Finding totals",
+            "",
+            f"critical {summary['critical']}, high {summary['high']}, "
+            f"medium {summary['medium']}, low {summary['low']}, info {summary['info']} "
+            f"(total {summary['total']})",
+        ]
+
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def export_compliance_csv(scores: list[DeviceScore], path: str | Path) -> Path:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["device", "score", "grade", "critical", "high", "medium", "low", "info"])
+        for score in scores:
+            writer.writerow(
+                [
+                    score.device,
+                    score.score,
+                    score.grade,
+                    score.counts.get("critical", 0),
+                    score.counts.get("high", 0),
+                    score.counts.get("medium", 0),
+                    score.counts.get("low", 0),
+                    score.counts.get("info", 0),
+                ]
+            )
     return p
 
 

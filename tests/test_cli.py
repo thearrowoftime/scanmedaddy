@@ -107,7 +107,7 @@ def test_run_cycle_with_mocked_ssh(workspace: Path, monkeypatch: pytest.MonkeyPa
     (workspace / ".env").write_text("FG_TEST_PW=a\nSCALANCE_TEST_PW=b\n", encoding="utf-8")
     fortigate_cfg = (SAMPLES / "fg-120g-01.cfg").read_text(encoding="utf-8")
 
-    def fake_backup(device, timeout=None, progress=None):
+    def fake_backup(device, timeout=None, progress=None, **kwargs):
         if device.name == "scalance-xc208-01":
             raise SSHBackupError("timed out waiting for config output")
         return fortigate_cfg

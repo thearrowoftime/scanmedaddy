@@ -26,9 +26,12 @@ from netaudit.models import Device
 
 DEFAULT_ENV_FILE = ".env"
 _ENV_INLINE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-# Env var checked when inventory leaves the password empty
+# Env vars checked when inventory leaves a credential field empty
 _ENV_NAME_TEMPLATE = "NETAUDIT_{name}_PASSWORD"
 _ENABLE_ENV_NAME_TEMPLATE = "NETAUDIT_{name}_ENABLE_PASSWORD"
+_KEY_PASSPHRASE_ENV_TEMPLATE = "NETAUDIT_{name}_KEY_PASSPHRASE"
+_JUMP_PASSWORD_ENV_TEMPLATE = "NETAUDIT_{name}_JUMP_PASSWORD"
+_JUMP_KEY_PASSPHRASE_ENV_TEMPLATE = "NETAUDIT_{name}_JUMP_KEY_PASSPHRASE"
 
 
 class SecretError(Exception):
@@ -273,12 +276,13 @@ def resolve_device_secrets(
     allow_prompt: bool = False,
 ) -> tuple[Device, list[SecretStatus]]:
     """Return a copy of the device with resolved credentials plus a status report."""
+    # A private key makes the password optional (and vice versa).
     password, pw_status = _resolve_field(
         device.name,
         "password",
         device.password,
         _auto_env_name(device.name, _ENV_NAME_TEMPLATE),
-        required=True,
+        required=not device.key_file,
         allow_prompt=allow_prompt,
     )
     enable_password, enable_status = _resolve_field(
@@ -289,9 +293,46 @@ def resolve_device_secrets(
         required=False,
         allow_prompt=allow_prompt,
     )
+    key_passphrase, key_status = _resolve_field(
+        device.name,
+        "key_passphrase",
+        device.key_passphrase,
+        _auto_env_name(device.name, _KEY_PASSPHRASE_ENV_TEMPLATE),
+        required=False,
+        allow_prompt=allow_prompt,
+    )
 
-    resolved = replace(device, password=password, enable_password=enable_password)
-    return resolved, [pw_status, enable_status]
+    statuses = [pw_status, enable_status, key_status]
+    jump = device.jump
+
+    if jump is not None:
+        jump_password, jump_pw_status = _resolve_field(
+            device.name,
+            "jump.password",
+            jump.password,
+            _auto_env_name(device.name, _JUMP_PASSWORD_ENV_TEMPLATE),
+            required=not jump.key_file,
+            allow_prompt=allow_prompt,
+        )
+        jump_passphrase, jump_key_status = _resolve_field(
+            device.name,
+            "jump.key_passphrase",
+            jump.key_passphrase,
+            _auto_env_name(device.name, _JUMP_KEY_PASSPHRASE_ENV_TEMPLATE),
+            required=False,
+            allow_prompt=allow_prompt,
+        )
+        jump = replace(jump, password=jump_password, key_passphrase=jump_passphrase)
+        statuses.extend([jump_pw_status, jump_key_status])
+
+    resolved = replace(
+        device,
+        password=password,
+        enable_password=enable_password,
+        key_passphrase=key_passphrase,
+        jump=jump,
+    )
+    return resolved, statuses
 
 
 def resolve_inventory_secrets(

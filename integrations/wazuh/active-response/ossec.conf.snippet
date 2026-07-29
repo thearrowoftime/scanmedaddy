@@ -1,0 +1,49 @@
+<!--
+  Wazuh manager configuration for the netaudit active response.
+  Paste these blocks inside <ossec_config> in /var/ossec/etc/ossec.conf.
+
+  The response runs on whichever node can reach the devices over SSH. Keep it on
+  the manager for a lab; in production put it on an agent inside the management
+  segment and set location to a specific agent id.
+-->
+
+<command>
+  <name>netaudit-respond</name>
+  <executable>netaudit-ar.py</executable>
+  <timeout_allowed>no</timeout_allowed>
+</command>
+
+<active-response>
+  <command>netaudit-respond</command>
+  <!-- local  = the agent that generated the alert
+       server = the manager
+       defined-agent + agent_id = a specific collector -->
+  <location>server</location>
+  <!-- Rules that mean "the device configuration may have changed".
+       100550 netaudit: SSH host key changed        (rules/netaudit_rules.xml)
+       100580 FortiGate: configuration object edited (rules/netaudit_triggers.xml)
+       100581 FortiGate: system attribute changed    (rules/netaudit_triggers.xml)
+       100582 Cisco-style: configuration changed     (rules/netaudit_triggers.xml)
+       Keep the list tight so the SSH pull is not spammed, and never add
+       netaudit's own config_changed rule (100531) - that would chase its own
+       tail. -->
+  <rules_id>100550,100580,100581,100582</rules_id>
+</active-response>
+
+<!--
+  The events netaudit writes back must be read by the local agent, so Wazuh can
+  decode them like any other netaudit event:
+
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/ossec/logs/netaudit-events.json</location>
+  </localfile>
+
+  Environment for the script (set in /etc/sysconfig or a systemd drop-in for
+  wazuh-execd, or hardcode the defaults in netaudit-ar.py):
+
+    NETAUDIT_BIN=/opt/netaudit/.venv/bin/netaudit
+    NETAUDIT_WORKDIR=/opt/netaudit
+    NETAUDIT_WAZUH_FILE=/var/ossec/logs/netaudit-events.json
+    NETAUDIT_DEVICE_MAP={"fw-edge":"fg-120g-01","192.168.20.10":"scalance-xc208-01"}
+-->

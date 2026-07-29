@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netaudit"
-version = "0.2.0b0"
+version = "0.3.0b0"
 description = "Network Audit and Config Backup (beta, company-internal) — SSH backup, diff, security audit for routers/switches/firewalls"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,12 @@ dependencies = [
     "tabulate>=0.9.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
 [project.scripts]
 netaudit = "netaudit.cli:main"
 
@@ -24,3 +30,22 @@ include = ["netaudit*"]
 
 [tool.setuptools.package-data]
 netaudit = ["rules/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",    # long lines are checked by the formatter, not the linter
+    "B008",    # click decorators legitimately call functions in defaults
+    "SIM108",  # ternaries are not always clearer here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "SIM117"]

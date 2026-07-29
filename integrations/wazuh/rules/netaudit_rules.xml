@@ -114,4 +114,59 @@
     <group>service_availability,</group>
   </rule>
 
+  <!--
+    SSH host key events. A changed key on a device that was not replaced means
+    either an unannounced rebuild or traffic interception, so it is rated above
+    every configuration finding.
+  -->
+  <rule id="100550" level="14">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.event_type">^host_key_changed$</field>
+    <description>netaudit: SSH host key CHANGED for $(netaudit.target) - possible interception or unannounced device replacement</description>
+    <group>attack,invalid_login,</group>
+  </rule>
+
+  <rule id="100551" level="5">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.event_type">^host_key_unpinned$</field>
+    <description>netaudit: SSH host key for $(netaudit.target) is not pinned yet</description>
+  </rule>
+
+  <rule id="100552" level="3">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.event_type">^host_key_learned$</field>
+    <description>netaudit: pinned SSH host key for $(netaudit.target)</description>
+    <options>no_full_log</options>
+  </rule>
+
+  <!-- Active response outcomes -->
+  <rule id="100560" level="4">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.event_type">^respond_summary$</field>
+    <description>netaudit active response: $(netaudit.detail)</description>
+    <options>no_full_log</options>
+  </rule>
+
+  <rule id="100561" level="10">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.event_type">^respond_failed$</field>
+    <description>netaudit active response could not back up $(netaudit.device): $(netaudit.detail)</description>
+    <group>service_availability,</group>
+  </rule>
+
+  <!-- Baseline drift and patch level -->
+  <rule id="100570" level="8">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.rule_id">^BASELINE-</field>
+    <description>netaudit: $(netaudit.device) drifted from the approved baseline - $(netaudit.title)</description>
+    <group>config_changed,</group>
+  </rule>
+
+  <rule id="100571" level="10">
+    <if_sid>100500,100501</if_sid>
+    <field name="netaudit.rule_id">^FW-OUTDATED$</field>
+    <description>netaudit: $(netaudit.device) runs firmware below the accepted minimum - $(netaudit.detail)</description>
+    <group>vulnerability-detector,</group>
+  </rule>
+
 </group>

@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from netaudit.audit import audit_config, infer_platform_from_config, load_rules, summarize_findings
 from netaudit.diff import diff_texts
 from netaudit.export import export_findings_csv, export_findings_markdown
